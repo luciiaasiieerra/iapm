@@ -10,13 +10,13 @@ class FinalExamGenerator:
     def __init__(self):
         print("Inicializando motor de precisión...")
         try:
-            self.nlp = spacy.load("es_core_news_lg")
+            self.nlp = spacy.load("es_core_news_sm")
         except:
             import os
-            os.system("python -m spacy download es_core_news_lg")
-            self.nlp = spacy.load("es_core_news_lg")
+            os.system("python -m spacy download es_core_news_sm")
+            self.nlp = spacy.load("es_core_news_sm")
             
-        self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        #self.embedder = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
         
         self.kb_fallback = {
             "PER": ["Ada Lovelace", "Claude Shannon", "Marvin Minsky", "Geoffrey Hinton"],
