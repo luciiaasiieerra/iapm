@@ -22,6 +22,7 @@ class FinalExamGenerator:
                 "es_core_news_sm",
                 disable=["parser", "tagger", "lemmatizer"]
             )
+        self.nlp.add_pipe("sentencizer")
 
         self.kb_fallback = {
             "PER": ["Ada Lovelace", "Claude Shannon", "Marvin Minsky", "Geoffrey Hinton"],
