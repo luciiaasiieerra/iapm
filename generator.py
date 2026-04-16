@@ -77,9 +77,7 @@ class FinalExamGenerator:
         return final_distractors
 
     def generate(self, text):
-        # 🔥 limitador de seguridad RAM
         text = text[:5000]
-
         doc = self.nlp(text)
 
         kb = {"PER": set(), "LOC": set(), "DATE": set(), "CONCEPT": set(), "ORG": set()}
@@ -94,11 +92,8 @@ class FinalExamGenerator:
             elif ent.label_ == "DATE" or self.is_year(ent.text):
                 kb["DATE"].add(ent.text)
 
-        output = []
-
         for sent in doc.sents:
 
-            # filtro básico
             if len(sent) == 0:
                 continue
 
@@ -122,7 +117,7 @@ class FinalExamGenerator:
                                 "ORG" if ent.label_ == "ORG" else "LOC"
                         break
 
-            # 3. fallback ligero (regex en vez de noun_chunks)
+            # 3. fallback
             if not target:
                 matches = re.findall(
                     r'\b[A-ZÁÉÍÓÚ][a-záéíóú]+\s[A-ZÁÉÍÓÚ][a-záéíóú]+\b',
@@ -149,15 +144,16 @@ class FinalExamGenerator:
 
                     pregunta = sent.text.replace(target, "_____").strip()
 
-                    output.append({
-                        "tipo": "test",
-                        "pregunta": f"{prefixes.get(label)}: {pregunta}",
-                        "opciones": options,
-                        "respuesta_correcta": target_final
-                    })
+                    return {
+                        "preguntas": [{
+                            "tipo": "test",
+                            "pregunta": f"{prefixes.get(label)}: {pregunta}",
+                            "opciones": options,
+                            "respuesta_correcta": target_final
+                        }]
+                    }
 
-        return {"preguntas": output}
-
+        return {"preguntas": []}
 
 # --- EJECUCIÓN ---
 texto_ejemplo = """
