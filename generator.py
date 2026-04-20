@@ -1,4 +1,3 @@
-
 import re
 import json
 import random
@@ -9,10 +8,13 @@ from difflib import SequenceMatcher
 import spacy
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from sentence_transformers import SentenceTransformer
 import numpy as np
 
 
+# ──────────────────────────────────────────────
+# Stopwords — via spaCy es_core_news_sm (~570 palabras)
+# Se inicializan al cargar el módulo para no repetir la carga
+# ──────────────────────────────────────────────
 
 def _load_spacy_stopwords() -> set:
     """Devuelve el set de stopwords en español de spaCy, normalizadas sin tildes."""
@@ -150,8 +152,6 @@ class FinalExamGenerator:
             os.system("python -m spacy download es_core_news_sm")
             self.nlp = spacy.load("es_core_news_sm")
 
-        print("Cargando sentence-transformers...")
-        self.embedder = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
         print("Sistema listo.")
 
     # ── TF-IDF pool ──────────────────────────────
@@ -236,19 +236,29 @@ class FinalExamGenerator:
 
     # ── Comprensión global ────────────────────────
 
+    def _tfidf_sim_matrix(self, sentences: list):
+        """Matriz de similitud coseno entre oraciones usando TF-IDF. ~KB de RAM."""
+        try:
+            vec = TfidfVectorizer(stop_words=list(STOPWORDS))
+            tfidf = vec.fit_transform(sentences)
+            return cosine_similarity(tfidf)
+        except Exception:
+            # Fallback: matriz de unos si hay muy pocas palabras distintas
+            n = len(sentences)
+            return np.ones((n, n))
+
     def _global_questions(self, sentences: list) -> list:
         if len(sentences) < 3:
             return []
 
-        embeddings = self.embedder.encode(sentences, show_progress_bar=False)
-        sim_matrix = cosine_similarity(embeddings)
+        sim_matrix = self._tfidf_sim_matrix(sentences)
         centrality = sim_matrix.sum(axis=1)
         central_idx = int(np.argmax(centrality))
 
         questions = []
 
-        # P1: idea principal
-        opts = self._build_global_options(sentences, central_idx, embeddings, sim_matrix)
+        # P1: idea principal (oración más conectada léxicamente con el resto)
+        opts = self._build_global_options(sentences, central_idx, sim_matrix)
         questions.append({
             "tipo": "comprension_global",
             "pregunta": "¿Cuál de las siguientes oraciones resume mejor la idea principal del texto?",
@@ -257,10 +267,12 @@ class FinalExamGenerator:
             "fuente": "comprension_global",
         })
 
-        # P2: tema secundario/distinto
-        distant_idx = int(np.argmin(sim_matrix[central_idx]))
+        # P2: tema secundario (oración con menor similitud léxica al núcleo)
+        sims_to_central = sim_matrix[central_idx].copy()
+        sims_to_central[central_idx] = 999
+        distant_idx = int(np.argmin(sims_to_central))
         if distant_idx != central_idx:
-            opts2 = self._build_global_options(sentences, distant_idx, embeddings, sim_matrix)
+            opts2 = self._build_global_options(sentences, distant_idx, sim_matrix)
             questions.append({
                 "tipo": "comprension_global",
                 "pregunta": "¿Qué afirmación introduce un tema distinto o secundario respecto al núcleo del texto?",
@@ -271,10 +283,10 @@ class FinalExamGenerator:
 
         return questions
 
-    def _build_global_options(self, sentences, correct_idx, embeddings, sim_matrix) -> list:
+    def _build_global_options(self, sentences, correct_idx, sim_matrix) -> list:
         sims = sim_matrix[correct_idx].copy()
-        sims[correct_idx] = 999  # excluir la correcta
-        # Tomar 3 oraciones con similitud media (ni muy parecidas ni muy distintas)
+        sims[correct_idx] = 999
+        # Distractores con similitud media: no demasiado parecidos ni demasiado distintos
         order = np.argsort(np.abs(sims - 0.3))
         distractors = []
         for idx in order:
