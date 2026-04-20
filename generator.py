@@ -84,14 +84,79 @@ RE_RELACIONAL = re.compile(
 
 class SentencePattern:
     @staticmethod
-    def detect(text: str) -> dict:
+    def detect(text: str, doc_sent=None) -> dict:
+        """
+        Detecta el patrón de la oración y extrae la pregunta + respuesta.
+        Prioridad:
+          1. Relacional  (agente hizo objeto)  → pregunta por agente u objeto
+          2. Definición  (X es Y)              → pregunta por Y
+          3. Causal      (X porque Y)          → pregunta por causa
+          4. Temporal    (... en AÑO ...)      → pregunta por fecha
+        La fecha va ÚLTIMA para no eclipsar entidades más informativas.
+        """
         text_norm = normalize(text.strip().rstrip("."))
         text_orig = text.strip().rstrip(".")
 
-        # 1. Temporal
+        # 1. Relacional — agente + verbo de acción + objeto
+        m = RE_RELACIONAL.match(text_norm)
+        if m:
+            m_orig = RE_RELACIONAL.match(text_orig)
+            agente = (m_orig.group("agente") if m_orig else m.group("agente")).strip()
+            objeto = (m_orig.group("objeto") if m_orig else m.group("objeto")).strip()
+            # Limpiar fecha del agente/objeto si quedó pegada
+            agente = RE_TEMPORAL.sub("", agente).strip().strip(",")
+            objeto = RE_TEMPORAL.sub("", objeto).strip().strip(",")
+            if not agente or not objeto:
+                pass  # caer a siguientes patrones
+            elif random.random() > 0.5:
+                return {
+                    "tipo": "relacional_agente",
+                    "pregunta": f"¿Quién realizó la siguiente acción: «{objeto}»?",
+                    "respuesta": agente,
+                }
+            else:
+                return {
+                    "tipo": "relacional_objeto",
+                    "pregunta": f"¿Qué hizo o creó «{agente}»?",
+                    "respuesta": objeto,
+                }
+
+        # 2. Definición — X es/fue/era Y
+        m = RE_DEFINICION.match(text_norm)
+        if m:
+            m_orig = RE_DEFINICION.match(text_orig)
+            sujeto = (m_orig.group("sujeto") if m_orig else m.group("sujeto")).strip()
+            predicado = (m_orig.group("predicado") if m_orig else m.group("predicado")).strip()
+            # Truncar predicado largo (máx ~60 chars hasta el primer punto/coma)
+            predicado = re.split(r"[,;]", predicado)[0].strip()
+            if len(predicado) > 80:
+                predicado = predicado[:80].rsplit(" ", 1)[0] + "…"
+            if sujeto and predicado:
+                return {
+                    "tipo": "definicion",
+                    "pregunta": f"¿Cómo se define o describe «{sujeto}»?",
+                    "respuesta": predicado,
+                }
+
+        # 3. Causal — X porque/ya que Y
+        m = RE_CAUSAL.search(text_norm)
+        if m:
+            m_orig = RE_CAUSAL.search(text_orig)
+            efecto = (m_orig.group("efecto") if m_orig else m.group("efecto")).strip()
+            causa = (m_orig.group("causa") if m_orig else m.group("causa")).strip()
+            causa = re.split(r"[,;]", causa)[0].strip()
+            if len(causa) > 80:
+                causa = causa[:80].rsplit(" ", 1)[0] + "…"
+            if efecto and causa:
+                return {
+                    "tipo": "causal",
+                    "pregunta": f"¿Por qué ocurrió lo siguiente?\n→ {efecto}",
+                    "respuesta": causa,
+                }
+
+        # 4. Temporal — último recurso si hay año/siglo pero no otro patrón
         m = RE_TEMPORAL.search(text_norm)
         if m:
-            # Recuperar fecha en texto original
             m_orig = RE_TEMPORAL.search(text_orig)
             fecha = m_orig.group("fecha") if m_orig else m.group("fecha")
             contexto = RE_TEMPORAL.sub("_____", text_orig, count=1)
@@ -100,50 +165,6 @@ class SentencePattern:
                 "pregunta": f"¿En qué año o período ocurrió esto?\n→ {contexto}",
                 "respuesta": fecha,
             }
-
-        # 2. Definición
-        m = RE_DEFINICION.match(text_norm)
-        if m:
-            # Extraer del texto original usando las mismas posiciones
-            m_orig = RE_DEFINICION.match(text_orig)
-            sujeto = (m_orig.group("sujeto") if m_orig else m.group("sujeto")).strip()
-            predicado = (m_orig.group("predicado") if m_orig else m.group("predicado")).strip()
-            return {
-                "tipo": "definicion",
-                "pregunta": f"¿Cómo se define o describe «{sujeto}»?",
-                "respuesta": predicado,
-            }
-
-        # 3. Causal
-        m = RE_CAUSAL.search(text_norm)
-        if m:
-            m_orig = RE_CAUSAL.search(text_orig)
-            efecto = (m_orig.group("efecto") if m_orig else m.group("efecto")).strip()
-            causa = (m_orig.group("causa") if m_orig else m.group("causa")).strip()
-            return {
-                "tipo": "causal",
-                "pregunta": f"¿Por qué o para qué ocurrió lo siguiente?\n→ {efecto}",
-                "respuesta": causa,
-            }
-
-        # 4. Relacional
-        m = RE_RELACIONAL.match(text_norm)
-        if m:
-            m_orig = RE_RELACIONAL.match(text_orig)
-            agente = (m_orig.group("agente") if m_orig else m.group("agente")).strip()
-            objeto = (m_orig.group("objeto") if m_orig else m.group("objeto")).strip()
-            if random.random() > 0.5:
-                return {
-                    "tipo": "relacional_agente",
-                    "pregunta": f"¿Quién desarrolló, creó o propuso «{objeto}»?",
-                    "respuesta": agente,
-                }
-            else:
-                return {
-                    "tipo": "relacional_objeto",
-                    "pregunta": f"¿Qué desarrolló, creó o propuso «{agente}»?",
-                    "respuesta": objeto,
-                }
 
         return None
 
@@ -468,8 +489,18 @@ class FinalExamGenerator:
         pool = self._build_tfidf_pool(sentences)
         output = []
 
-        for sent_text in sentences:
+        for sent in doc.sents:
+            sent_text = sent.text.strip()
+            if sent_text not in sentences:
+                continue
+
             pattern = SentencePattern.detect(sent_text)
+
+            # Fallback NER: si ningún patrón regex matcheó pero hay entidades,
+            # generar pregunta directamente desde spaCy
+            if not pattern:
+                pattern = _ner_pattern(sent)
+
             if not pattern:
                 continue
 
@@ -499,6 +530,40 @@ class FinalExamGenerator:
 # ──────────────────────────────────────────────
 # Utilidad
 # ──────────────────────────────────────────────
+
+def _ner_pattern(sent) -> dict:
+    """
+    Genera una pregunta a partir de entidades NER cuando ningún patrón
+    regex detectó estructura. Ejemplos:
+      - PER en sujeto → "¿Quién es mencionado en relación a X?"
+      - LOC           → "¿En qué lugar ocurrió esto?"
+      - ORG           → "¿Qué organización se menciona aquí?"
+    """
+    label_priority = ["PER", "ORG", "GPE", "LOC"]
+    label_map = {"GPE": "LOC", "LOC": "LOC", "PER": "PER", "ORG": "ORG"}
+
+    question_templates = {
+        "PER": "¿Qué persona se menciona en la siguiente afirmación?\n→ {ctx}",
+        "LOC": "¿En qué lugar se desarrolla lo siguiente?\n→ {ctx}",
+        "ORG": "¿Qué organización o institución se menciona?\n→ {ctx}",
+    }
+
+    for priority_label in label_priority:
+        for ent in sent.ents:
+            if ent.label_ == priority_label:
+                mapped = label_map.get(ent.label_, "CONCEPT")
+                template = question_templates.get(mapped)
+                if not template:
+                    continue
+                # Contexto: oración con la entidad reemplazada por _____
+                ctx = sent.text.replace(ent.text, "_____").strip()
+                return {
+                    "tipo": f"ner_{mapped.lower()}",
+                    "pregunta": template.format(ctx=ctx),
+                    "respuesta": ent.text.strip(),
+                }
+    return None
+
 
 def _infer_label(answer: str, doc) -> str:
     if re.search(r"\b(19|20)\d{2}\b", answer) or re.search(
