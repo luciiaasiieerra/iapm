@@ -1,3 +1,13 @@
+"""
+FinalExamGenerator v3 — sin APIs externas
+==========================================
+Estrategias:
+  1. Detección de patrones sintácticos (definición, causal, temporal, relacional)
+     → preguntas naturales según el tipo de oración
+  2. Distractores coherentes via TF-IDF del dominio + restricción semántica
+  3. Preguntas de comprensión global via TF-IDF vectorizer (centralidad léxica)
+"""
+
 import re
 import json
 import random
@@ -157,80 +167,117 @@ class FinalExamGenerator:
     # ── TF-IDF pool ──────────────────────────────
 
     def _build_tfidf_pool(self, sentences: list) -> dict:
-        pool = defaultdict(list)
+        """
+        Construye el pool de candidatos exclusivamente a partir del texto:
+        - DATE  : todos los años y expresiones temporales del texto
+        - PER   : personas detectadas por spaCy
+        - ORG   : organizaciones detectadas por spaCy
+        - LOC   : lugares detectados por spaCy (GPE + LOC)
+        - CONCEPT: términos clave por TF-IDF (bigramas incluidos)
+        No hay listas hardcodeadas — el dominio lo pone el texto.
+        """
+        pool = defaultdict(set)
+        full_text = " ".join(sentences)
 
-        all_years = re.findall(r"\b(19|20)\d{2}\b", " ".join(sentences))
-        pool["DATE"] = list(set(all_years))
+        # ── Fechas: años + expresiones tipo "siglo XIX", "década de 1980" ──
+        pool["DATE"].update(re.findall(r"\b(?:19|20)\d{2}\b", full_text))
+        pool["DATE"].update(re.findall(
+            r"\bsiglo\s+[IVXLC]+\b", full_text, re.IGNORECASE
+        ))
+        pool["DATE"].update(re.findall(
+            r"\bd[eé]cada(?:\s+de(?:\s+los)?)?\s+\d{4}s?\b", full_text, re.IGNORECASE
+        ))
 
-        doc = self.nlp(" ".join(sentences)[:10000])
+        # ── Entidades spaCy ──────────────────────────────────────────────
+        doc = self.nlp(full_text[:10000])
+        label_map = {"PER": "PER", "ORG": "ORG", "GPE": "LOC", "LOC": "LOC"}
         for ent in doc.ents:
-            label_map = {"PER": "PER", "ORG": "ORG", "GPE": "LOC", "LOC": "LOC"}
             mapped = label_map.get(ent.label_)
             if mapped:
-                pool[mapped].append(ent.text.strip())
+                pool[mapped].add(ent.text.strip())
 
+        # ── Sustantivos propios no capturados por NER ────────────────────
+        # Secuencias de tokens con mayúscula que spaCy no clasificó como entidad
+        # → se añaden al pool del tipo más probable según contexto (LOC/PER/ORG)
+        ent_spans = {ent.text for ent in doc.ents}
+        for token in doc:
+            if (
+                token.is_alpha
+                and token.text[0].isupper()
+                and not token.is_sent_start
+                and token.text not in ent_spans
+                and normalize(token.text) not in STOPWORDS
+                and len(token.text) > 3
+            ):
+                # Sin contexto suficiente para clasificar → va a CONCEPT
+                pool["CONCEPT"].add(token.text)
+
+        # ── TF-IDF: conceptos/frases clave del dominio ───────────────────
         try:
             vectorizer = TfidfVectorizer(
-                max_features=80,
+                max_features=100,
                 ngram_range=(1, 2),
                 stop_words=list(STOPWORDS),
             )
             vectorizer.fit(sentences)
             terms = vectorizer.get_feature_names_out().tolist()
-            pool["CONCEPT"] = [t.capitalize() for t in terms if len(t) > 4]
+            for t in terms:
+                if len(t) > 4:
+                    pool["CONCEPT"].add(t.capitalize())
         except Exception:
             pass
 
-        for k in pool:
-            pool[k] = list(set(pool[k]))
-
-        return pool
+        # Convertir sets a listas
+        return {k: list(v) for k, v in pool.items()}
 
     # ── Distractores ─────────────────────────────
 
     def _get_distractors(self, answer: str, label: str, pool: dict, n: int = 3) -> list:
+        """
+        Distractores siempre del mismo tipo semántico que la respuesta.
+        Fuente exclusiva: el propio texto (pool). Para DATE se generan
+        años aritméticamente si el texto tiene pocos. Para el resto,
+        si el texto no tiene suficientes entidades del tipo requerido,
+        la pregunta se descarta (ver generate()).
+        """
         answer_clean = normalize(answer)
-
         candidates = list(pool.get(label, []))
-        if len(candidates) < n + 2:
-            for k, v in pool.items():
-                if k != label:
-                    candidates += v
 
+        # DATE: generar años cercanos sintéticamente — siempre habrá suficientes
         if label == "DATE":
             year_match = re.search(r"\d{4}", answer)
             if year_match:
                 base = int(year_match.group())
-                offsets = [o for o in range(-20, 21) if o != 0]
+                offsets = [o for o in range(-30, 31) if o != 0]
                 random.shuffle(offsets)
                 for o in offsets:
                     y = str(base + o)
                     if y not in candidates:
                         candidates.append(y)
-                    if len(candidates) >= n + 5:
+                    if len(candidates) >= n + 10:
                         break
 
         random.shuffle(candidates)
         distractors = []
+
+        # Primer paso: umbral estricto (ratio < 0.55)
         for cand in candidates:
             cand_clean = normalize(cand.strip())
             if cand_clean == answer_clean:
                 continue
-            ratio = SequenceMatcher(None, cand_clean, answer_clean).ratio()
-            if ratio < 0.55:
+            if SequenceMatcher(None, cand_clean, answer_clean).ratio() < 0.55:
                 distractors.append(cand.strip())
             if len(distractors) == n:
                 break
 
-        placeholders = [
-            "No se menciona en el texto",
-            "Dato no especificado en el fragmento",
-            "Información no disponible",
-        ]
-        i = 0
-        while len(distractors) < n:
-            distractors.append(placeholders[i % len(placeholders)])
-            i += 1
+        # Segundo paso: si faltan, umbral relajado (cualquier distinto)
+        if len(distractors) < n:
+            for cand in candidates:
+                c = cand.strip()
+                if normalize(c) != answer_clean and c not in distractors:
+                    distractors.append(c)
+                if len(distractors) == n:
+                    break
 
         return distractors[:n]
 
