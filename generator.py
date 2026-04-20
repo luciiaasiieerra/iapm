@@ -294,57 +294,139 @@ class FinalExamGenerator:
             n = len(sentences)
             return np.ones((n, n))
 
-    def _global_questions(self, sentences: list) -> list:
+    # ── Extracción de frases cortas ──────────────────
+
+    def _key_phrases(self, sentences: list, pool: dict) -> list:
+        """
+        Extrae frases cortas (2-4 palabras de contenido) del texto
+        para usar como opciones en preguntas de comprensión global.
+        Fuentes: entidades NER + términos TF-IDF top.
+        """
+        phrases = set()
+
+        # Entidades nombradas: ya son cortas y concretas
+        for label in ("PER", "ORG", "LOC"):
+            for e in pool.get(label, []):
+                if 1 < len(e.split()) <= 5:
+                    phrases.add(e.strip())
+
+        # Conceptos TF-IDF: tomar solo bigramas o términos de 1 palabra larga
+        for c in pool.get("CONCEPT", []):
+            words = c.strip().split()
+            if 1 <= len(words) <= 3 and all(len(w) > 3 for w in words):
+                phrases.add(c.strip())
+
+        # Años sueltos también son respuestas cortas válidas
+        for d in pool.get("DATE", []):
+            if re.match(r"^(19|20)\d{2}$", d.strip()):
+                phrases.add(d.strip())
+
+        return list(phrases)
+
+    def _global_questions(self, sentences: list, pool: dict) -> list:
+        """
+        Preguntas de comprensión global con opciones CORTAS (frases clave),
+        no oraciones completas.
+        """
         if len(sentences) < 3:
             return []
 
         sim_matrix = self._tfidf_sim_matrix(sentences)
         centrality = sim_matrix.sum(axis=1)
         central_idx = int(np.argmax(centrality))
+        central_sent = sentences[central_idx]
+
+        key_phrases = self._key_phrases(sentences, pool)
+        if len(key_phrases) < 4:
+            return []  # No hay suficientes frases cortas, omitir
 
         questions = []
 
-        # P1: idea principal (oración más conectada léxicamente con el resto)
-        opts = self._build_global_options(sentences, central_idx, sim_matrix)
-        questions.append({
-            "tipo": "comprension_global",
-            "pregunta": "¿Cuál de las siguientes oraciones resume mejor la idea principal del texto?",
-            "opciones": opts,
-            "respuesta_correcta": sentences[central_idx],
-            "fuente": "comprension_global",
-        })
+        # ── P1: ¿De qué trata principalmente el texto? ──────────────────
+        # Respuesta correcta: término más central según TF-IDF
+        # (el que aparece más veces en el pool de CONCEPT o entidades)
+        vec = TfidfVectorizer(stop_words=list(STOPWORDS))
+        try:
+            tfidf_mat = vec.fit_transform(sentences)
+            feature_names = vec.get_feature_names_out()
+            # Término con mayor TF-IDF promedio en toda la matriz
+            mean_scores = np.asarray(tfidf_mat.mean(axis=0)).flatten()
+            top_idx = int(np.argmax(mean_scores))
+            top_term = feature_names[top_idx].capitalize()
+        except Exception:
+            top_term = key_phrases[0]
 
-        # P2: tema secundario (oración con menor similitud léxica al núcleo)
-        sims_to_central = sim_matrix[central_idx].copy()
-        sims_to_central[central_idx] = 999
-        distant_idx = int(np.argmin(sims_to_central))
-        if distant_idx != central_idx:
-            opts2 = self._build_global_options(sentences, distant_idx, sim_matrix)
+        # 3 distractores: frases clave distintas al top_term
+        distractors = [
+            p for p in key_phrases
+            if normalize(p) != normalize(top_term)
+        ]
+        random.shuffle(distractors)
+        distractors = distractors[:3]
+
+        if len(distractors) == 3:
+            options = distractors + [top_term]
+            random.shuffle(options)
             questions.append({
                 "tipo": "comprension_global",
-                "pregunta": "¿Qué afirmación introduce un tema distinto o secundario respecto al núcleo del texto?",
-                "opciones": opts2,
-                "respuesta_correcta": sentences[distant_idx],
+                "pregunta": "¿Cuál es el tema o concepto central del texto?",
+                "opciones": options,
+                "respuesta_correcta": top_term,
                 "fuente": "comprension_global",
             })
 
-        return questions
-
-    def _build_global_options(self, sentences, correct_idx, sim_matrix) -> list:
-        sims = sim_matrix[correct_idx].copy()
-        sims[correct_idx] = 999
-        # Distractores con similitud media: no demasiado parecidos ni demasiado distintos
-        order = np.argsort(np.abs(sims - 0.3))
-        distractors = []
-        for idx in order:
-            if idx == correct_idx:
-                continue
-            distractors.append(sentences[idx])
-            if len(distractors) == 3:
+        # ── P2: ¿A qué hace referencia [oración central]? ───────────────
+        # Extrae la entidad/concepto más importante de la oración central
+        doc_cent = self.nlp(central_sent)
+        anchor = None
+        # Primero intentar con entidades NER
+        for ent in doc_cent.ents:
+            if ent.label_ in ("PER", "ORG", "GPE", "LOC"):
+                anchor = ent.text.strip()
                 break
-        options = distractors + [sentences[correct_idx]]
-        random.shuffle(options)
-        return options
+        # Si no hay entidad, usar el sustantivo propio más largo
+        if not anchor:
+            candidates_anchor = [
+                t.text for t in doc_cent
+                if t.text[0].isupper() and not t.is_stop and len(t.text) > 3
+            ]
+            anchor = max(candidates_anchor, key=len) if candidates_anchor else None
+
+        if anchor:
+            # Respuesta: término TF-IDF más asociado a esa oración
+            try:
+                sent_idx = sentences.index(central_sent)
+                sent_vec = tfidf_mat[sent_idx]
+                sent_scores = np.asarray(sent_vec.todense()).flatten()
+                # Excluir el propio anchor
+                for i, name in enumerate(feature_names):
+                    if normalize(name) in normalize(anchor):
+                        sent_scores[i] = 0
+                best_idx = int(np.argmax(sent_scores))
+                best_concept = feature_names[best_idx].capitalize()
+            except Exception:
+                best_concept = None
+
+            if best_concept:
+                dist2 = [
+                    p for p in key_phrases
+                    if normalize(p) != normalize(best_concept)
+                       and normalize(p) != normalize(anchor)
+                ]
+                random.shuffle(dist2)
+                dist2 = dist2[:3]
+                if len(dist2) == 3:
+                    opts2 = dist2 + [best_concept]
+                    random.shuffle(opts2)
+                    questions.append({
+                        "tipo": "comprension_global",
+                        "pregunta": f"En el texto, ¿con qué concepto o acción se relaciona principalmente «{anchor}»?",
+                        "opciones": opts2,
+                        "respuesta_correcta": best_concept,
+                        "fuente": "comprension_global",
+                    })
+
+        return questions
 
     # ── Filtro de oraciones ───────────────────────
 
@@ -409,7 +491,7 @@ class FinalExamGenerator:
                 "fuente": sent_text,
             })
 
-        output += self._global_questions(sentences)
+        output += self._global_questions(sentences, pool)
         random.shuffle(output)
         return {"preguntas": output, "total": len(output)}
 
