@@ -408,19 +408,17 @@ class FinalExamGenerator:
             valid.append(sent.text.strip())
         return self.nlp(" ".join(valid))
 
-    def generate(self, text: str) -> dict:
+    def generate(self, text: str, existing_questions: list[str] | None = None) -> dict:
         text = text[:10000]
         doc = self._filter_doc(self.nlp(text))
         pool = _build_pool(doc)
 
-        # Obtener todas las preguntas de cada tipo
         per_qs   = _all_per_questions(doc, pool)
         loc_qs   = _all_loc_questions(doc, pool)
         date_qs  = _all_date_questions(doc, pool)
         def_qs   = _all_def_questions(doc, pool)
         con_qs   = _all_concept_questions(doc, pool)
 
-        # Construir opciones para cada pregunta
         def build_question(q: dict) -> dict | None:
             if q["label"] in ("DEF", "CONCEPT"):
                 distractors = q.get("distractores_custom", [])
@@ -444,12 +442,8 @@ class FinalExamGenerator:
             "definicion": [build_question(q) for q in def_qs],
             "concepto":   [build_question(q) for q in con_qs],
         }
-        # Limpiar Nones
         buckets = {k: [q for q in v if q] for k, v in buckets.items()}
 
-        # Intercalar en ciclo: fecha → lugar → persona → definición → fecha → ...
-        # Si un tipo se agota, se omite en ese turno pero los demás continúan
-        # hasta que TODOS los buckets estén vacíos.
         cycle_order = ["fecha", "lugar", "persona", "concepto", "definicion"]
         queues = {k: list(buckets[k]) for k in cycle_order}
         output = []
@@ -459,8 +453,16 @@ class FinalExamGenerator:
                 if queues[tipo]:
                     output.append(queues[tipo].pop(0))
 
-        return {"preguntas": output, "total": len(output)}
+        # ── Filtrar preguntas ya existentes en el banco ──────────────────
+        if existing_questions:
+            existing_normalized = {normalize(q) for q in existing_questions}
+            output = [
+                q for q in output
+                if normalize(q["pregunta"]) not in existing_normalized
+            ]
+        # ────────────────────────────────────────────────────────────────
 
+        return {"preguntas": output, "total": len(output)}
 # ── Demo ──────────────────────────────────────
 
 if __name__ == "__main__":
