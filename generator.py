@@ -345,21 +345,16 @@ class FinalExamGenerator:
         buckets = {k: [q for q in v if q] for k, v in buckets.items()}
 
         # Intercalar en ciclo: fecha → lugar → persona → definición → fecha → ...
+        # Si un tipo se agota, se omite en ese turno pero los demás continúan
+        # hasta que TODOS los buckets estén vacíos.
         cycle_order = ["fecha", "lugar", "persona", "definicion"]
+        queues = {k: list(buckets[k]) for k in cycle_order}
         output = []
-        indices = {k: 0 for k in cycle_order}
 
-        while True:
-            added = False
+        while any(queues[k] for k in cycle_order):
             for tipo in cycle_order:
-                idx = indices[tipo]
-                bucket = buckets[tipo]
-                if idx < len(bucket):
-                    output.append(bucket[idx])
-                    indices[tipo] += 1
-                    added = True
-            if not added:
-                break
+                if queues[tipo]:
+                    output.append(queues[tipo].pop(0))
 
         return {"preguntas": output, "total": len(output)}
 
