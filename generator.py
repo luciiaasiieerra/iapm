@@ -31,11 +31,8 @@ def normalize(text: str) -> str:
 
 
 def _load_stopwords() -> set:
-    import spacy
-    result = set()
-    for w in spacy.lang.es.STOP_WORDS:
-        result.add(normalize(w))
-    return result
+    from spacy.lang.es import STOP_WORDS
+    return {normalize(w) for w in STOP_WORDS}
 
 
 STOPWORDS: set = _load_stopwords()
