@@ -1,15 +1,36 @@
+import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from generator import FinalExamGenerator
 
 gen: FinalExamGenerator | None = None
+gen_lock = threading.Lock()
+gen_loading = False
+
+
+def _load_generator_background():
+    """Carga spaCy en un hilo separado para no bloquear el arranque."""
+    global gen, gen_loading
+    try:
+        print("Cargando spaCy en background...")
+        instance = FinalExamGenerator()
+        with gen_lock:
+            gen = instance
+        print("Generador listo.")
+    except Exception as e:
+        print(f"Error cargando generador: {e}")
+    finally:
+        gen_loading = False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # NO cargamos spaCy aquí — Render mataría el proceso por timeout
-    # La carga se hace lazy en el primer /generate
+    global gen_loading
+    gen_loading = True
+    # Arrancar carga en hilo de fondo — el servidor ya está escuchando
+    thread = threading.Thread(target=_load_generator_background, daemon=True)
+    thread.start()
     yield
 
 
@@ -30,32 +51,29 @@ class RequestModel(BaseModel):
     )
 
 
-def get_generator() -> FinalExamGenerator:
-    """Carga el generador la primera vez que se necesita (lazy loading)."""
-    global gen
-    if gen is None:
-        print("Cargando spaCy por primera vez...")
-        gen = FinalExamGenerator()
-        print("Generador listo.")
-    return gen
-
-
 @app.get("/")
 def root():
-    # Render hace HEAD / para detectar el puerto — debe responder inmediatamente
-    # sin esperar a que spaCy cargue
-    return {"status": "ok"}
+    # Render hace HEAD/GET aquí para detectar el puerto — responde SIEMPRE
+    return {"status": "ok", "ready": gen is not None}
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "ready": gen is not None}
+    return {"status": "ok", "ready": gen is not None, "loading": gen_loading}
 
 
 @app.post("/generate")
 def generate(req: RequestModel):
-    generator = get_generator()  # carga spaCy aquí si aún no está cargado
-    result = generator.generate(req.text, existing_questions=req.existing_questions)
+    with gen_lock:
+        current_gen = gen
+
+    if current_gen is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Modelo todavía cargando, reintenta en unos segundos."
+        )
+
+    result = current_gen.generate(req.text, existing_questions=req.existing_questions)
     result["preguntas"] = result["preguntas"][: req.max_questions]
     result["total"] = len(result["preguntas"])
     return result
