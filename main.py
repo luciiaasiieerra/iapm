@@ -38,7 +38,10 @@ def health():
 @app.post("/generate")
 def generate(req: RequestModel):
     if gen is None:
-        raise HTTPException(status_code=503, detail="Modelo cargando, reintenta en unos segundos.")
+        raise HTTPException(
+            status_code=503,
+            detail="Modelo cargando, reintenta en unos segundos."
+        )
     result = gen.generate(req.text, existing_questions=req.existing_questions)
     result["preguntas"] = result["preguntas"][: req.max_questions]
     result["total"] = len(result["preguntas"])

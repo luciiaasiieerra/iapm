@@ -60,20 +60,14 @@ RE_DEF = re.compile(
 # ──────────────────────────────────────────────
 
 def _build_pool(doc) -> dict:
-    """
-    Extrae candidatos del propio texto agrupados por tipo.
-    Solo fuentes: NER de spaCy + regex de fechas.
-    """
     pool = defaultdict(set)
     full = doc.text
 
-    # Fechas
     for m in RE_YEAR.finditer(full):
         pool["DATE"].add(m.group("year"))
     for m in RE_PERIOD.finditer(full):
         pool["DATE"].add(m.group("period"))
 
-    # Entidades
     for ent in doc.ents:
         if ent.label_ == "PER":
             pool["PER"].add(ent.text.strip())
@@ -90,16 +84,9 @@ def _build_pool(doc) -> dict:
 # ──────────────────────────────────────────────
 
 def _distractors(answer: str, label: str, pool: dict, n: int = 3) -> list:
-    """
-    Devuelve n distractores del MISMO tipo semántico que la respuesta.
-    Para DATE genera años cercanos si faltan candidatos.
-    Para el resto, si no hay suficientes en el texto, devuelve lista vacía
-    → la pregunta se descarta.
-    """
     answer_norm = normalize(answer)
     candidates = list(pool.get(label, []))
 
-    # DATE: rellenar con años aritméticamente
     if label == "DATE":
         m = RE_YEAR.search(answer)
         if m:
@@ -124,7 +111,6 @@ def _distractors(answer: str, label: str, pool: dict, n: int = 3) -> list:
         if len(result) == n:
             break
 
-    # Segunda pasada con umbral más laxo
     if len(result) < n:
         for c in candidates:
             cn = normalize(c)
@@ -137,19 +123,13 @@ def _distractors(answer: str, label: str, pool: dict, n: int = 3) -> list:
 
 
 # ──────────────────────────────────────────────
-# Extracción de preguntas por tipo (todas las del texto)
+# Extracción de preguntas por tipo
 # ──────────────────────────────────────────────
 
 def _all_per_questions(doc, pool: dict) -> list:
-    """
-    Pregunta de persona: solo el contexto con _____ donde estaba el nombre.
-    Fallback: busca nombres propios (mayúscula + no stopword) si spaCy
-    no detectó PER suficientes.
-    """
     seen = set()
     results = []
 
-    # Pool de personas: NER + fallback de tokens con mayúscula
     all_pers = list(pool.get("PER", []))
     for token in doc:
         if (token.is_alpha and token.text[0].isupper()
@@ -159,7 +139,6 @@ def _all_per_questions(doc, pool: dict) -> list:
                 all_pers.append(token.text)
 
     for sent in doc.sents:
-        # Primero intentar con NER
         ents = [e for e in sent.ents if e.label_ == "PER"]
         if not ents:
             continue
@@ -242,10 +221,6 @@ def _all_date_questions(doc, pool: dict) -> list:
 
 
 def _all_def_questions(doc, pool: dict) -> list:
-    """
-    Definición: la pregunta es el sujeto con _____ donde estaba el predicado.
-    Alta exigencia para evitar falsas definiciones.
-    """
     bad_starts = {"un","una","el","la","los","las","que","cuando",
                   "donde","como","este","esta","algo","muy"}
 
@@ -254,7 +229,7 @@ def _all_def_questions(doc, pool: dict) -> list:
         m = RE_DEF.match(sent.text.strip())
         if not m:
             continue
-        sujeto = m.group("sujeto").strip()
+        sujeto   = m.group("sujeto").strip()
         predicado = m.group("predicado").strip()
         if len(sujeto.split()) > 4:
             continue
@@ -267,7 +242,7 @@ def _all_def_questions(doc, pool: dict) -> list:
         pairs.append((sujeto, predicado, sent.text.strip()))
 
     if len(pairs) < 4:
-        return []  # Necesitamos ≥4 para tener 3 distractores por pregunta
+        return []
 
     results = []
     for i, (sujeto, predicado, _) in enumerate(pairs):
@@ -283,15 +258,7 @@ def _all_def_questions(doc, pool: dict) -> list:
     return results
 
 
-
 def _all_concept_questions(doc, pool: dict) -> list:
-    """
-    Pregunta de concepto: detecta oraciones donde un término clave del texto
-    aparece en un contexto explicativo (no es nombre propio ni fecha).
-    Usa TF-IDF para encontrar los términos más representativos del dominio
-    y genera fill-in-the-blank reemplazando el término en su oración.
-    Distractores: otros términos TF-IDF del mismo texto.
-    """
     sentences = [sent.text.strip() for sent in doc.sents if len(sent.text.strip()) > 10]
     if len(sentences) < 3:
         return []
@@ -302,13 +269,12 @@ def _all_concept_questions(doc, pool: dict) -> list:
             ngram_range=(1, 1),
             stop_words=list(STOPWORDS),
         )
-        tfidf = vec.fit_transform(sentences)
-        terms = vec.get_feature_names_out()          # términos ordenados por vocabulario
-        scores = tfidf.toarray()                      # (n_sents, n_terms)
+        tfidf  = vec.fit_transform(sentences)
+        terms  = vec.get_feature_names_out()
+        scores = tfidf.toarray()
     except Exception:
         return []
 
-    # Términos que NO son nombres propios ni fechas (filtrar entidades NER)
     ent_texts = {normalize(e.text) for e in doc.ents}
     valid_terms = [
         t for t in terms
@@ -320,20 +286,19 @@ def _all_concept_questions(doc, pool: dict) -> list:
     if len(valid_terms) < 4:
         return []
 
-    results = []
-    seen_terms = set()
+    results      = []
+    seen_terms   = set()
 
     for sent_idx, sent in enumerate(doc.sents):
         sent_text = sent.text.strip()
         if len(sent_text) < 20:
             continue
 
-        # Término con mayor TF-IDF en esta oración (entre los válidos)
         row = scores[sent_idx] if sent_idx < len(scores) else None
         if row is None:
             continue
 
-        best_term = None
+        best_term  = None
         best_score = 0.0
         for t in valid_terms:
             t_idx = list(terms).index(t) if t in terms else -1
@@ -341,22 +306,19 @@ def _all_concept_questions(doc, pool: dict) -> list:
                 continue
             sc = row[t_idx]
             if sc > best_score and normalize(t) not in seen_terms:
-                # Comprobar que el término aparece literalmente en la oración
-                pattern = re.compile(r'' + re.escape(t) + r'', re.IGNORECASE)
+                pattern = re.compile(r'' + re.escape(t) + r'', re.IGNORECASE)
                 if pattern.search(sent_text):
                     best_score = sc
-                    best_term = t
+                    best_term  = t
 
         if not best_term or best_score < 0.05:
             continue
 
         seen_terms.add(normalize(best_term))
 
-        # Reemplazar el término en la oración
-        pattern = re.compile(r'' + re.escape(best_term) + r'', re.IGNORECASE)
+        pattern = re.compile(r'' + re.escape(best_term) + r'', re.IGNORECASE)
         ctx = pattern.sub("_____", sent_text, count=1).strip()
 
-        # Distractores: otros términos válidos del texto
         distractors = [
             t.capitalize() for t in valid_terms
             if normalize(t) != normalize(best_term)
@@ -394,10 +356,9 @@ class FinalExamGenerator:
         print("Sistema listo.")
 
     def _filter_doc(self, doc):
-        """Reconstruye el texto solo con oraciones válidas."""
         valid = []
         for sent in doc.sents:
-            tokens = [t for t in sent if not t.is_punct and not t.is_space]
+            tokens  = [t for t in sent if not t.is_punct and not t.is_space]
             content = [t for t in tokens if normalize(t.text) not in STOPWORDS]
             if len(tokens) < 5 or len(content) < 2:
                 continue
@@ -410,7 +371,7 @@ class FinalExamGenerator:
 
     def generate(self, text: str, existing_questions: list[str] | None = None) -> dict:
         text = text[:10000]
-        doc = self._filter_doc(self.nlp(text))
+        doc  = self._filter_doc(self.nlp(text))
         pool = _build_pool(doc)
 
         per_qs  = _all_per_questions(doc, pool)
@@ -453,29 +414,13 @@ class FinalExamGenerator:
                 if queues[tipo]:
                     output.append(queues[tipo].pop(0))
 
-        # ── Filtrar preguntas ya existentes en el banco ──────────────────────────
+        # ── Filtrar preguntas ya existentes en el banco ──────────────
         if existing_questions:
             existing_normalized = {normalize(q) for q in existing_questions}
             output = [
                 q for q in output
                 if normalize(q["pregunta"]) not in existing_normalized
             ]
-        # ────────────────────────────────────────────────────────────────────────
+        # ────────────────────────────────────────────────────────────
 
         return {"preguntas": output, "total": len(output)}
-# ── Demo ──────────────────────────────────────
-
-if __name__ == "__main__":
-    texto = """
-    La Revolución Francesa comenzó en París en 1789 y transformó la sociedad europea.
-    Napoleón Bonaparte fue un militar y estadista francés que dominó Europa a principios del siglo XIX.
-    La batalla de Waterloo tuvo lugar en Bélgica en 1815 y supuso la derrota definitiva de Napoleón.
-    El liberalismo es una corriente política que defiende las libertades individuales y la igualdad ante la ley.
-    Marie Curie nació en Varsovia en 1867 y fue la primera mujer en ganar el Premio Nobel.
-    La Torre Eiffel fue construida en París para la Exposición Universal de 1889.
-    El romanticismo es un movimiento artístico que surgió en Europa a finales del siglo XVIII.
-    Charles Darwin publicó El origen de las especies en Londres en 1859.
-    """
-    gen = FinalExamGenerator()
-    result = gen.generate(texto)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
