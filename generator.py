@@ -413,11 +413,11 @@ class FinalExamGenerator:
         doc = self._filter_doc(self.nlp(text))
         pool = _build_pool(doc)
 
-        per_qs   = _all_per_questions(doc, pool)
-        loc_qs   = _all_loc_questions(doc, pool)
-        date_qs  = _all_date_questions(doc, pool)
-        def_qs   = _all_def_questions(doc, pool)
-        con_qs   = _all_concept_questions(doc, pool)
+        per_qs  = _all_per_questions(doc, pool)
+        loc_qs  = _all_loc_questions(doc, pool)
+        date_qs = _all_date_questions(doc, pool)
+        def_qs  = _all_def_questions(doc, pool)
+        con_qs  = _all_concept_questions(doc, pool)
 
         def build_question(q: dict) -> dict | None:
             if q["label"] in ("DEF", "CONCEPT"):
@@ -453,14 +453,14 @@ class FinalExamGenerator:
                 if queues[tipo]:
                     output.append(queues[tipo].pop(0))
 
-        # ── Filtrar preguntas ya existentes en el banco ──────────────────
+        # ── Filtrar preguntas ya existentes en el banco ──────────────────────────
         if existing_questions:
             existing_normalized = {normalize(q) for q in existing_questions}
             output = [
                 q for q in output
                 if normalize(q["pregunta"]) not in existing_normalized
             ]
-        # ────────────────────────────────────────────────────────────────
+        # ────────────────────────────────────────────────────────────────────────
 
         return {"preguntas": output, "total": len(output)}
 # ── Demo ──────────────────────────────────────

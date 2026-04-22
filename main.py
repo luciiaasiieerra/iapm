@@ -24,7 +24,10 @@ app = FastAPI(
 class RequestModel(BaseModel):
     text: str = Field(..., min_length=50, description="Texto fuente")
     max_questions: int = Field(default=15, ge=1, le=40)
-    existing_questions: list[str] = Field(default=[], description="Preguntas ya en el banco")
+    existing_questions: list[str] = Field(
+        default=[],
+        description="Textos de preguntas ya guardadas en el banco. La IA no las repetirá."
+    )
 
 
 @app.get("/health")
