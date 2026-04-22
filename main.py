@@ -8,8 +8,8 @@ gen: FinalExamGenerator | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global gen
-    gen = FinalExamGenerator()
+    # NO cargamos spaCy aquí — Render mataría el proceso por timeout
+    # La carga se hace lazy en el primer /generate
     yield
 
 
@@ -30,6 +30,23 @@ class RequestModel(BaseModel):
     )
 
 
+def get_generator() -> FinalExamGenerator:
+    """Carga el generador la primera vez que se necesita (lazy loading)."""
+    global gen
+    if gen is None:
+        print("Cargando spaCy por primera vez...")
+        gen = FinalExamGenerator()
+        print("Generador listo.")
+    return gen
+
+
+@app.get("/")
+def root():
+    # Render hace HEAD / para detectar el puerto — debe responder inmediatamente
+    # sin esperar a que spaCy cargue
+    return {"status": "ok"}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "ready": gen is not None}
@@ -37,12 +54,8 @@ def health():
 
 @app.post("/generate")
 def generate(req: RequestModel):
-    if gen is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Modelo cargando, reintenta en unos segundos."
-        )
-    result = gen.generate(req.text, existing_questions=req.existing_questions)
+    generator = get_generator()  # carga spaCy aquí si aún no está cargado
+    result = generator.generate(req.text, existing_questions=req.existing_questions)
     result["preguntas"] = result["preguntas"][: req.max_questions]
     result["total"] = len(result["preguntas"])
     return result
